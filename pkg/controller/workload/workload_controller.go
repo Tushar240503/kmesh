@@ -20,13 +20,18 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+	dnsclient "istio.io/istio/pkg/dns/client"
+	"istio.io/pkg/env"
 
+	"kmesh.net/kmesh/daemon/options"
 	"kmesh.net/kmesh/pkg/auth"
 	"kmesh.net/kmesh/pkg/bpf/restart"
 	bpfwl "kmesh.net/kmesh/pkg/bpf/workload"
 	"kmesh.net/kmesh/pkg/controller/telemetry"
+	"kmesh.net/kmesh/pkg/dns"
 	"kmesh.net/kmesh/pkg/logger"
 )
 
@@ -46,9 +51,11 @@ type Controller struct {
 	OperationMetricController *telemetry.BpfProgMetric
 	bpfWorkloadObj            *bpfwl.BpfWorkload
 	dnsResolverController     *dnsController
+	dnsServer                 *dnsclient.LocalDNSServer
+	dnsConfig                 *options.DNSConfig
 }
 
-func NewController(bpfWorkload *bpfwl.BpfWorkload, enableMonitoring, enablePerfMonitor bool) (*Controller, error) {
+func NewController(bpfWorkload *bpfwl.BpfWorkload, enableMonitoring, enablePerfMonitor bool, dnsConfig *options.DNSConfig) (*Controller, error) {
 	processor := NewProcessor(bpfWorkload.SockConn.KmeshCgroupSockWorkloadObjects.KmeshCgroupSockWorkloadMaps)
 	dnsResolverController, err := NewDnsController(processor.WorkloadCache)
 	if err != nil {
@@ -66,6 +73,7 @@ func NewController(bpfWorkload *bpfwl.BpfWorkload, enableMonitoring, enablePerfM
 		Processor:             processor,
 		bpfWorkloadObj:        bpfWorkload,
 		dnsResolverController: dnsResolverController,
+		dnsConfig:             dnsConfig,
 	}
 	// do some initialization when restart
 	// restore endpoint index, otherwise endpoint number can double
@@ -82,9 +90,15 @@ func NewController(bpfWorkload *bpfwl.BpfWorkload, enableMonitoring, enablePerfM
 }
 
 func (c *Controller) Run(ctx context.Context, stopCh <-chan struct{}) error {
-	if err := c.Processor.PrepareDNSProxy(); err != nil {
-		log.Errorf("failed to prepare for dns proxy, err: %+v", err)
-		return err
+	if c.dnsConfig.EnableDNSProxy {
+		if err := c.StartDNS(); err != nil {
+			log.Errorf("failed to prepare for dns proxy, err: %+v", err)
+			return err
+		}
+	} else {
+		if err := c.Processor.PrepareDNSProxy(false); err != nil {
+			log.Errorf("failed to clean dns proxy, err: %+v", err)
+		}
 	}
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -115,6 +129,9 @@ func (c *Controller) Run(ctx context.Context, stopCh <-chan struct{}) error {
 }
 
 func (c *Controller) Close() error {
+	if c.dnsServer != nil {
+		c.dnsServer.Close()
+	}
 	return c.Processor.Close()
 }
 
@@ -214,4 +231,56 @@ func (c *Controller) SetConnectionMetricTrigger(enable bool) {
 
 func (c *Controller) GetConnectionMetricTrigger() bool {
 	return c.MetricController.EnableConnectionMetric.Load()
+}
+
+func (c *Controller) StartDNS() error {
+	if c.dnsServer != nil {
+		return nil
+	}
+
+	kmeshNamespace := env.Register("POD_NAMESPACE", "kmesh-system", "kmesh namespace").Get()
+	clusterDomain := env.Register("CLUSTER_DOMAIN", "cluster.local", "cluster domain").Get()
+
+	server, err := dnsclient.NewLocalDNSServer(kmeshNamespace, clusterDomain, ":53", c.dnsConfig.DNSForwardParallel)
+	if err != nil {
+		return fmt.Errorf("failed to start local dns server: %v", err)
+	}
+
+	ntb := dns.NewNameTableBuilder(c.Processor.ServiceCache, c.Processor.WorkloadCache)
+
+	debounceTime := time.Second
+	timer := time.NewTimer(0)
+	<-timer.C
+	h := func(rsp *discoveryv3.DeltaDiscoveryResponse) error {
+		if c.dnsServer == nil {
+			return nil
+		}
+		// debounce
+		if timer.Reset(debounceTime) {
+			return nil
+		}
+
+		go func() {
+			<-timer.C
+			log.Debugf("trigger name table update")
+			if c.dnsServer != nil {
+				c.dnsServer.UpdateLookupTable(ntb.BuildNameTable())
+			}
+		}()
+
+		return nil
+	}
+
+	c.Processor.WithResourceHandlers(AddressType, h)
+	server.StartDNS()
+	c.dnsServer = server
+	return c.Processor.PrepareDNSProxy(true)
+}
+
+func (c *Controller) StopDNS() {
+	if c.dnsServer != nil {
+		c.dnsServer.Close()
+		c.dnsServer = nil
+	}
+	_ = c.Processor.PrepareDNSProxy(false)
 }

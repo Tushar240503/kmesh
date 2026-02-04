@@ -60,6 +60,7 @@ const (
 	patternWorkloadMetrics    = "/workload_metrics"
 	patternConnectionMetrics  = "/connection_metrics"
 	patternAuthz              = "/authz"
+	patternDNS                = "/dns"
 
 	bpfLoggerName = "bpf"
 
@@ -101,6 +102,7 @@ func NewServer(c *controller.XdsClient, configs *options.BootstrapConfigs, loade
 	s.mux.HandleFunc(patternWorkloadMetrics, s.workloadMetricHandler)
 	s.mux.HandleFunc(patternConnectionMetrics, s.connectionMetricHandler)
 	s.mux.HandleFunc(patternAuthz, s.authzHandler)
+	s.mux.HandleFunc(patternDNS, s.dnsHandler)
 
 	// TODO: add dump certificate, authorizationPolicies and services
 	s.mux.HandleFunc(patternReadyProbe, s.readyProbe)
@@ -353,6 +355,35 @@ func (s *Server) authzHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) dnsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	info := r.URL.Query().Get("enable")
+	enabled, err := strconv.ParseBool(info)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(fmt.Sprintf("invalid enable=%s", info)))
+		return
+	}
+
+	if !s.checkWorkloadMode(w) {
+		return
+	}
+
+	if enabled {
+		if err := s.xdsClient.WorkloadController.StartDNS(); err != nil {
+			http.Error(w, fmt.Sprintf("start dns failed: %v", err), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		s.xdsClient.WorkloadController.StopDNS()
+	}
 	w.WriteHeader(http.StatusOK)
 }
 

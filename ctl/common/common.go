@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"kmesh.net/kmesh/ctl/authz"
+	"kmesh.net/kmesh/ctl/dns"
 	"kmesh.net/kmesh/ctl/dump"
 	logcmd "kmesh.net/kmesh/ctl/log"
 	"kmesh.net/kmesh/ctl/monitoring"
@@ -44,6 +45,7 @@ func GetRootCommand() *cobra.Command {
 	rootCmd.AddCommand(version.NewCmd())
 	rootCmd.AddCommand(monitoring.NewCmd())
 	rootCmd.AddCommand(authz.NewCmd())
+	rootCmd.AddCommand(dns.NewCmd())
 	rootCmd.AddCommand(secret.NewCmd())
 
 	return rootCmd

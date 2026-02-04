@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"istio.io/pkg/env"
 )
 
 type BootstrapConfigs struct {
@@ -29,6 +30,7 @@ type BootstrapConfigs struct {
 	CniConfig           *cniConfig
 	ByPassConfig        *byPassConfig
 	SecretManagerConfig *secretConfig
+	DNSConfig           *DNSConfig
 }
 
 func NewBootstrapConfigs() *BootstrapConfigs {
@@ -37,6 +39,10 @@ func NewBootstrapConfigs() *BootstrapConfigs {
 		CniConfig:           &cniConfig{},
 		ByPassConfig:        &byPassConfig{},
 		SecretManagerConfig: &secretConfig{},
+		DNSConfig: &DNSConfig{
+			EnableDNSProxy:     env.Register("KMESH_ENABLE_DNS_PROXY", false, "When DNS proxy is enabled, a DNS server will be started in kmesh daemon and serve DNS requests.").Get(),
+			DNSForwardParallel: env.Register("DNS_FORWARD_PARALLEL", false, "If set to true, kmesh will send parallel DNS queries to all upstream nameservers").Get(),
+		},
 	}
 }
 
@@ -54,6 +60,7 @@ func (c *BootstrapConfigs) AttachFlags(cmd *cobra.Command) {
 	c.CniConfig.AttachFlags(cmd)
 	c.ByPassConfig.AttachFlags(cmd)
 	c.SecretManagerConfig.AttachFlags(cmd)
+	c.DNSConfig.AttachFlags(cmd)
 }
 
 func (c *BootstrapConfigs) ParseConfigs() error {
@@ -62,6 +69,9 @@ func (c *BootstrapConfigs) ParseConfigs() error {
 	}
 	if err := c.CniConfig.ParseConfig(); err != nil {
 		return fmt.Errorf("parse CniConfig failed, %v", err)
+	}
+	if err := c.DNSConfig.ParseConfig(); err != nil {
+		return fmt.Errorf("parse DNSConfig failed, %v", err)
 	}
 	return nil
 }
